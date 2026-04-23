@@ -510,9 +510,91 @@ textarea{resize:vertical;min-height:80px}
 </div>
 
 <script>
+// ============ SUPABASE CONFIG ============
+const SUPA_URL='https://hbmtfghtgiuwfyzudzsq.supabase.co';
+const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhibXRmZ2h0Z2l1d2Z5enVkenNxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY4OTU0NjMsImV4cCI6MjA5MjQ3MTQ2M30.hWIUbW9O9nerPghvqk7QF3Xo57Whjo_EkK1Pt01_EtE';
+const HEADERS={'Content-Type':'application/json','apikey':SUPA_KEY,'Authorization':'Bearer '+SUPA_KEY,'Prefer':'return=representation'};
+
+async function supaGet(tabela){
+  const r=await fetch(`${SUPA_URL}/rest/v1/${tabela}?order=id`,{headers:{...HEADERS,'Prefer':''}});
+  return r.ok?await r.json():[];
+}
+async function supaUpsert(tabela,dados){
+  const arr=Array.isArray(dados)?dados:[dados];
+  const r=await fetch(`${SUPA_URL}/rest/v1/${tabela}`,{method:'POST',headers:{...HEADERS,'Prefer':'resolution=merge-duplicates,return=minimal'},body:JSON.stringify(arr)});
+  return r.ok;
+}
+async function supaDelete(tabela,id){
+  const r=await fetch(`${SUPA_URL}/rest/v1/${tabela}?id=eq.${id}`,{method:'DELETE',headers:{...HEADERS,'Prefer':''}});
+  return r.ok;
+}
+async function supaInsert(tabela,dados){
+  const r=await fetch(`${SUPA_URL}/rest/v1/${tabela}`,{method:'POST',headers:{...HEADERS,'Prefer':'return=representation'},body:JSON.stringify(dados)});
+  return r.ok?await r.json():null;
+}
+
+// ============ STORAGE LOCAL (fallback) ============
 const KEY='epromme_v2';
-function load(){try{const d=localStorage.getItem(KEY);return d?JSON.parse(d):{pecas:[],vendas:[],entradas:[]}}catch{return{pecas:[],vendas:[],entradas:[]}}}
-function save(d){localStorage.setItem(KEY,JSON.stringify(d))}
+function loadLocal(){try{const d=localStorage.getItem(KEY);return d?JSON.parse(d):{pecas:[],vendas:[],entradas:[]}}catch{return{pecas:[],vendas:[],entradas:[]}}}
+function saveLocal(d){localStorage.setItem(KEY,JSON.stringify(d))}
+
+// ============ CARREGAR DADOS DA NUVEM ============
+async function carregarNuvem(){
+  try{
+    showLoading(true);
+    const [pecas,vendas,entradas,cfgArr]=await Promise.all([
+      supaGet('pecas'),supaGet('vendas'),supaGet('entradas'),supaGet('configuracoes')
+    ]);
+    // Mapeia campos do Supabase para o formato do sistema
+    db.pecas=pecas.map(p=>({...p,estoque:p.estoque||0,min:p.min||2,custo:parseFloat(p.custo)||0,preco:parseFloat(p.preco)||0}));
+    db.vendas=vendas.map(v=>({...v,pecaId:v.peca_id,qtd:v.qtd,preco:parseFloat(v.preco)||0,comissao:parseFloat(v.comissao)||11,frete:parseFloat(v.frete)||18,lucro:parseFloat(v.lucro)||0,pedido:v.pedido||'',data:v.data}));
+    db.entradas=entradas.map(e=>({...e,pecaId:e.peca_id,qtd:e.qtd,custo:parseFloat(e.custo)||0,ipiTotal:parseFloat(e.ipi_total)||0,ipiUnit:parseFloat(e.ipi_unit)||0,custoReal:parseFloat(e.custo_real)||0,nf:e.nf||'',data:e.data}));
+    const cfg=cfgArr[0]||{prazo:14,cobertura:3,opcoes:{}};
+    db.config={prazo:cfg.prazo||14,cobertura:cfg.cobertura||3};
+    db.opcoes=cfg.opcoes||{};
+    saveLocal(db);
+    showLoading(false);
+    return true;
+  }catch(err){
+    console.error('Erro ao carregar nuvem:',err);
+    showLoading(false);
+    return false;
+  }
+}
+
+// ============ SALVAR NA NUVEM ============
+async function save(d){
+  saveLocal(d);
+  // Salva peças
+  if(d.pecas&&d.pecas.length>0){
+    const pecasSupa=d.pecas.map(p=>({id:p.id,nome:p.nome,marca:p.marca||'',tipo:p.tipo||'',produto:p.produto||'',modelo:p.modelo||'',sku:p.sku||'',local:p.local||'',custo:p.custo||0,preco:p.preco||0,estoque:p.estoque||0,min:p.min||2,link:p.link||''}));
+    await supaUpsert('pecas',pecasSupa);
+  }
+}
+
+// Salva venda na nuvem
+async function saveVenda(v){
+  return await supaInsert('vendas',{peca_id:v.pecaId,qtd:v.qtd,preco:v.preco,comissao:v.comissao,frete:v.frete,lucro:v.lucro,pedido:v.pedido||'',data:new Date().toISOString()});
+}
+
+// Salva entrada na nuvem
+async function saveEntrada(e){
+  return await supaInsert('entradas',{peca_id:e.pecaId,qtd:e.qtd,custo:e.custo,ipi_total:e.ipiTotal||0,ipi_unit:e.ipiUnit||0,custo_real:e.custoReal||e.custo,nf:e.nf||'',data:e.data||new Date().toISOString().split('T')[0]});
+}
+
+// Salva configurações na nuvem
+async function saveConfig(cfg,opcoes){
+  await supaUpsert('configuracoes',{id:1,prazo:cfg.prazo,cobertura:cfg.cobertura,opcoes:opcoes||{}});
+}
+
+// Loading indicator
+function showLoading(show){
+  let el=document.getElementById('loading-bar');
+  if(!el){el=document.createElement('div');el.id='loading-bar';el.style.cssText='position:fixed;top:0;left:0;width:100%;height:3px;background:var(--green);z-index:999;transition:opacity 0.3s';document.body.appendChild(el);}
+  el.style.opacity=show?'1':'0';
+}
+
+function load(){return loadLocal()}
 let nfItensGlobal=[];
 let db=load();
 
@@ -673,8 +755,10 @@ function lancarEntrada(){
   if(!p)return;
   p.estoque+=qtd;
   if(custo>0)p.custo=custo;
-  db.entradas.push({pecaId:pid,qtd,custo:custo||p.custo,nf,data:new Date().toISOString()});
+  const entrada={pecaId:pid,qtd,custo:custo||p.custo,ipiTotal:0,ipiUnit:0,custoReal:custo||p.custo,nf,data:new Date().toISOString().split('T')[0]};
+  db.entradas.push(entrada);
   save(db);
+  saveEntrada(entrada);
   alert(`✓ ${qtd}x "${p.nome}" adicionado ao estoque.\nEstoque atual: ${p.estoque} unidades.`);
   document.getElementById('ent-qtd').value='1';
   document.getElementById('ent-custo').value='';
@@ -899,8 +983,10 @@ function lancarVenda(){
   const lucroU=preco-p.custo-taxaML-frete;
   const lucroT=lucroU*qtd;
   p.estoque=Math.max(0,p.estoque-qtd);
-  db.vendas.push({pecaId:pid,qtd,preco,comissao:com,frete,lucro:lucroT,pedido,data:new Date().toISOString()});
+  const venda={pecaId:pid,qtd,preco,comissao:com,frete,lucro:lucroT,pedido,data:new Date().toISOString()};
+  db.vendas.push(venda);
   save(db);
+  saveVenda(venda);
   alert(`✓ Venda registrada!\nLucro líquido: ${fmt(lucroT)}\nEstoque restante: ${p.estoque} unidades`);
   document.getElementById('vnd-peca').value='';
   document.getElementById('vnd-preco').value='';
@@ -1066,7 +1152,9 @@ function salvarConfig(){
   const cobertura=parseInt(document.getElementById('cfg-cobertura').value||3);
   if(prazo<1||cobertura<1){alert('Valores inválidos.');return;}
   db.config={prazo,cobertura};
+  if(!db.opcoes)db.opcoes={};
   save(db);
+  saveConfig({prazo,cobertura},db.opcoes);
   const msg=document.getElementById('cfg-msg');
   msg.textContent='✓ Configurações salvas!';
   msg.style.color='var(--green)';
@@ -1278,8 +1366,16 @@ function fecharOpcoes(){
 function toggleOutroTipo(){}
 function toggleOutroProduto(){}
 
-renderDash();
-updateHeader();
+// Inicialização — carrega da nuvem, usa local como fallback
+(async()=>{
+  const ok=await carregarNuvem();
+  if(!ok){
+    // Fallback: usa dados locais
+    console.log('Usando dados locais como fallback');
+  }
+  renderDash();
+  updateHeader();
+})();
 // Popula os selects do modal na abertura
 document.addEventListener('DOMContentLoaded',()=>{
   popularSelect('p-marca','marca');
